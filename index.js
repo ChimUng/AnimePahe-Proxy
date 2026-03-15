@@ -232,11 +232,22 @@ app.get("/m3u8-proxy", async (req, res) => {
                     });
                 }
 
-                Object.entries(targetResponse.headers).forEach(([k, v]) => {
-                    if (CONFIG.UPSTREAM_HEADERS.includes(k.toLowerCase())) {
-                        res.setHeader(k, v);
-                    }
-                });
+                const isVideoSegment = 
+                    url.pathname.toLowerCase().endsWith('.jpg') ||
+                    url.pathname.toLowerCase().endsWith('.ts') ||
+                    url.pathname.toLowerCase().endsWith('.m4s') ||
+                    url.pathname.toLowerCase().endsWith('.key');
+
+                if (isVideoSegment) {
+                    // Force đúng content-type cho video segments
+                    res.setHeader('Content-Type', 'video/mp2t');
+                } else {
+                    Object.entries(targetResponse.headers).forEach(([k, v]) => {
+                        if (CONFIG.UPSTREAM_HEADERS.includes(k.toLowerCase())) {
+                            res.setHeader(k, v);
+                        }
+                    });
+                }
 
                 res.writeHead(targetResponse.statusCode);
                 res.end(targetResponse.body);
