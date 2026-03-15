@@ -144,22 +144,25 @@ function generateProxyUrl(targetUrl, headersParam) {
 function proxyPlaylistContent(content, url, headersParam) {
     return content.split("\n").map((line) => {
         const trimmed = line.trim();
-
         if (trimmed === '' || trimmed.startsWith("#EXTM3U") || trimmed.startsWith("#EXT-X-VERSION")) {
             return line;
         }
-
         if (trimmed.startsWith("#")) {
             return line.replace(/(URI\s*=\s*")([^"]+)(")/gi, (match, prefix, uri, suffix) => {
                 try {
-                    const abs = new URL(uri, url.href).href;
+                    let abs;
+                    // ✅ Key URI dạng /m3u8-proxy?... là relative của proxy server
+                    if (uri.startsWith('/m3u8-proxy')) {
+                        abs = `https://anime-pahe-proxy.vercel.app${uri}`;
+                    } else {
+                        abs = new URL(uri, url.href).href;
+                    }
                     return `${prefix}${generateProxyUrl(abs, headersParam)}${suffix}`;
                 } catch (e) {
                     return match;
                 }
             });
         }
-
         try {
             const abs = new URL(trimmed, url.href).href;
             return generateProxyUrl(abs, headersParam);
