@@ -141,7 +141,7 @@ function generateProxyUrl(targetUrl, headersParam) {
     return proxyUrl;
 }
 
-function proxyPlaylistContent(content, url, headersParam, baseProxyUrl) {
+function proxyPlaylistContent(content, url, headersParam) {
     return content.split("\n").map((line) => {
         const trimmed = line.trim();
 
@@ -153,8 +153,7 @@ function proxyPlaylistContent(content, url, headersParam, baseProxyUrl) {
             return line.replace(/(URI\s*=\s*")([^"]+)(")/gi, (match, prefix, uri, suffix) => {
                 try {
                     const abs = new URL(uri, url.href).href;
-                    // ✅ Dùng absolute URL có domain đầy đủ
-                    return `${prefix}${baseProxyUrl}/m3u8-proxy?url=${encodeURIComponent(abs)}${suffix}`;
+                    return `${prefix}${generateProxyUrl(abs, headersParam)}${suffix}`;
                 } catch (e) {
                     return match;
                 }
@@ -220,9 +219,7 @@ app.get("/m3u8-proxy", async (req, res) => {
 
             if (isPlaylist) {
                 const content = targetResponse.body.toString('utf8');
-                // ✅ Truyền thêm baseProxyUrl
-                const baseProxyUrl = `${req.protocol}://${req.get('host')}`;
-                const proxiedContent = proxyPlaylistContent(content, url, headersParam, baseProxyUrl);
+                const proxiedContent = proxyPlaylistContent(content, url, headersParam);
                 res.setHeader('Content-Type', "application/vnd.apple.mpegurl");
                 res.status(200).send(proxiedContent);
             } else {
@@ -235,22 +232,11 @@ app.get("/m3u8-proxy", async (req, res) => {
                     });
                 }
 
-                const isVideoSegment = 
-                    url.pathname.toLowerCase().endsWith('.jpg') ||
-                    url.pathname.toLowerCase().endsWith('.ts') ||
-                    url.pathname.toLowerCase().endsWith('.m4s') ||
-                    url.pathname.toLowerCase().endsWith('.key');
-
-                if (isVideoSegment) {
-                    // Force đúng content-type cho video segments
-                    res.setHeader('Content-Type', 'video/mp2t');
-                } else {
-                    Object.entries(targetResponse.headers).forEach(([k, v]) => {
-                        if (CONFIG.UPSTREAM_HEADERS.includes(k.toLowerCase())) {
-                            res.setHeader(k, v);
-                        }
-                    });
-                }
+                Object.entries(targetResponse.headers).forEach(([k, v]) => {
+                    if (CONFIG.UPSTREAM_HEADERS.includes(k.toLowerCase())) {
+                        res.setHeader(k, v);
+                    }
+                });
 
                 res.writeHead(targetResponse.statusCode);
                 res.end(targetResponse.body);
