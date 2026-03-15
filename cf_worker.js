@@ -134,7 +134,13 @@ function proxyPlaylistContent(content, targetUrl, workerUrl, headersParam) {
         if (trimmed.startsWith("#")) {
             return line.replace(/(URI\s*=\s*["'])([^"']+)(["'])/gi, (match, prefix, uri, suffix) => {
                 try {
-                    const abs = new URL(uri, targetUrl.href).href;
+                    let abs;
+                    if (uri.startsWith('/')) {
+                        // ✅ URI kiểu /m3u8-proxy?... là relative của proxy worker
+                        abs = workerUrl.origin + uri;
+                    } else {
+                        abs = new URL(uri, targetUrl.href).href;
+                    }
                     return `${prefix}${generateProxyUrl(abs, workerUrl, headersParam)}${suffix}`;
                 } catch (e) {
                     return match;
