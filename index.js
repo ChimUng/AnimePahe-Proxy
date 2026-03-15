@@ -141,7 +141,7 @@ function generateProxyUrl(targetUrl, headersParam) {
     return proxyUrl;
 }
 
-function proxyPlaylistContent(content, url, headersParam) {
+function proxyPlaylistContent(content, url, headersParam, baseProxyUrl) {
     return content.split("\n").map((line) => {
         const trimmed = line.trim();
 
@@ -153,7 +153,8 @@ function proxyPlaylistContent(content, url, headersParam) {
             return line.replace(/(URI\s*=\s*")([^"]+)(")/gi, (match, prefix, uri, suffix) => {
                 try {
                     const abs = new URL(uri, url.href).href;
-                    return `${prefix}${generateProxyUrl(abs, headersParam)}${suffix}`;
+                    // ✅ Dùng absolute URL có domain đầy đủ
+                    return `${prefix}${baseProxyUrl}/m3u8-proxy?url=${encodeURIComponent(abs)}${suffix}`;
                 } catch (e) {
                     return match;
                 }
@@ -219,7 +220,9 @@ app.get("/m3u8-proxy", async (req, res) => {
 
             if (isPlaylist) {
                 const content = targetResponse.body.toString('utf8');
-                const proxiedContent = proxyPlaylistContent(content, url, headersParam);
+                // ✅ Truyền thêm baseProxyUrl
+                const baseProxyUrl = `${req.protocol}://${req.get('host')}`;
+                const proxiedContent = proxyPlaylistContent(content, url, headersParam, baseProxyUrl);
                 res.setHeader('Content-Type', "application/vnd.apple.mpegurl");
                 res.status(200).send(proxiedContent);
             } else {
