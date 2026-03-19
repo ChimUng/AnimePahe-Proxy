@@ -7,3 +7,6 @@ enabled = true
 
 [vars]
 ALLOWED_ORIGINS = "*"
+
+
+# CONSUMET_URI = "https://animeflix-api-v2.vercel.app"

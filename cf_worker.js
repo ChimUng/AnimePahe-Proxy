@@ -10,17 +10,35 @@ const CONFIG = {
         EXPOSE_HEADERS: 'Content-Range, Content-Length, Accept-Ranges, Content-Type',
         ALLOW_CREDENTIALS: 'true'
     },
-    CACHE_CONTROL: 'no-store, no-cache, must-revalidate, proxy-revalidate'
+    CACHE_CONTROL: 'no-store, no-cache, must-revalidate, proxy-revalidate',
+
+    // justanime endpoint
+    JUSTANIME_BASE: 'https://core.justanime.to',
+    // consumet endpoint - set via env var hoặc hardcode nếu bạn có instance riêng
+    // CONSUMET_URI: 'https://your-consumet.vercel.app'
 };
 
 const cookieJar = new Map();
 
+// ─── CORS HELPERS ────────────────────────────────────────────────────────────
+
 function isOriginAllowed(origin, allowedOrigins) {
-    if (!allowedOrigins || allowedOrigins.length === 0 || allowedOrigins.includes("*")) {
-        return true;
-    }
+    if (!allowedOrigins || allowedOrigins.length === 0 || allowedOrigins.includes("*")) return true;
     return allowedOrigins.includes(origin);
 }
+
+function setCorsHeaders(request, responseHeaders) {
+    const origin = request.headers.get('origin') || '*';
+    responseHeaders.set('Access-Control-Allow-Origin', origin);
+    responseHeaders.set('Access-Control-Allow-Methods', CONFIG.CORS.ALLOW_METHODS);
+    responseHeaders.set('Access-Control-Allow-Headers', CONFIG.CORS.ALLOW_HEADERS);
+    responseHeaders.set('Access-Control-Expose-Headers', CONFIG.CORS.EXPOSE_HEADERS);
+    responseHeaders.set('Access-Control-Allow-Credentials', CONFIG.CORS.ALLOW_CREDENTIALS);
+    responseHeaders.set('Cache-Control', CONFIG.CACHE_CONTROL);
+    responseHeaders.set('X-Proxy-By', 'cloudflare-worker-m3u8-proxy');
+}
+
+// ─── M3U8 PROXY HELPERS ──────────────────────────────────────────────────────
 
 function buildUpstreamHeaders(request, url, headersParam) {
     const headers = new Headers({
@@ -49,26 +67,15 @@ function buildUpstreamHeaders(request, url, headersParam) {
 
     if (referer) {
         let refStr = decodeURIComponent(referer);
-
         if (url.hostname.includes('kwik') || url.hostname.includes('kwics')) {
             refStr = CONFIG.ANIMEPAHE_BASE;
             if (!refStr.endsWith('/')) refStr += '/';
         } else if (url.hostname.includes('owocdn') || url.hostname.includes('cdn')) {
-            if (!refStr.includes('kwik.cx')) {
-                refStr = CONFIG.DEFAULT_REFERER;
-            }
+            if (!refStr.includes('kwik.cx')) refStr = CONFIG.DEFAULT_REFERER;
         }
-
-        if (refStr.includes('kwik.cx') && !refStr.endsWith('/')) {
-            refStr += '/';
-        }
+        if (refStr.includes('kwik.cx') && !refStr.endsWith('/')) refStr += '/';
         headers.set('referer', refStr);
-
-        try {
-            headers.set('origin', new URL(refStr).origin);
-        } catch (e) {
-            headers.set('origin', refStr);
-        }
+        try { headers.set('origin', new URL(refStr).origin); } catch (e) { headers.set('origin', refStr); }
     }
 
     if (url.hostname.includes('owocdn')) {
@@ -86,7 +93,6 @@ function buildUpstreamHeaders(request, url, headersParam) {
         const current = headers.get('cookie');
         headers.set('cookie', current ? `${current}; ${storedCookies}` : storedCookies);
     }
-
     return headers;
 }
 
@@ -95,29 +101,21 @@ function updateCookieJar(url, response) {
     if (setCookie) {
         const current = cookieJar.get(url.hostname) || "";
         const cookies = setCookie.split(', ');
-
-        const merged = [...new Set([
-            ...current.split('; '),
-            ...cookies.map(c => c.split(';')[0])
-        ])].filter(Boolean).join('; ');
-
+        const merged = [...new Set([...current.split('; '), ...cookies.map(c => c.split(';')[0])])].filter(Boolean).join('; ');
         cookieJar.set(url.hostname, merged);
     }
 }
 
-function setCorsHeaders(request, responseHeaders) {
-    const origin = request.headers.get('origin') || '*';
-    responseHeaders.set('Access-Control-Allow-Origin', origin);
-    responseHeaders.set('Access-Control-Allow-Methods', CONFIG.CORS.ALLOW_METHODS);
-    responseHeaders.set('Access-Control-Allow-Headers', CONFIG.CORS.ALLOW_HEADERS);
-    responseHeaders.set('Access-Control-Expose-Headers', CONFIG.CORS.EXPOSE_HEADERS);
-    responseHeaders.set('Access-Control-Allow-Credentials', CONFIG.CORS.ALLOW_CREDENTIALS);
-    responseHeaders.set('Cache-Control', CONFIG.CACHE_CONTROL);
-    responseHeaders.set('X-Proxy-By', 'cloudflare-worker-m3u8-proxy');
+function generateProxyUrl(targetUrl, workerUrl, headersParam) {
+    const url = new URL(workerUrl.origin + workerUrl.pathname.replace('/animepahe-source', '/m3u8-proxy'));
+    url.searchParams.set('url', targetUrl);
+    if (headersParam) url.searchParams.set('headers', headersParam);
+    return url.toString();
 }
 
-function generateProxyUrl(targetUrl, workerUrl, headersParam) {
-    const url = new URL(workerUrl.origin + workerUrl.pathname);
+// Dùng để rewrite URL trong M3U8 playlist
+function generateProxyUrlBase(targetUrl, workerOrigin, headersParam) {
+    const url = new URL(`${workerOrigin}/m3u8-proxy`);
     url.searchParams.set('url', targetUrl);
     if (headersParam) url.searchParams.set('headers', headersParam);
     return url.toString();
@@ -126,54 +124,182 @@ function generateProxyUrl(targetUrl, workerUrl, headersParam) {
 function proxyPlaylistContent(content, targetUrl, workerUrl, headersParam) {
     return content.split("\n").map((line) => {
         const trimmed = line.trim();
-
-        if (trimmed === '' || trimmed.startsWith("#EXTM3U") || trimmed.startsWith("#EXT-X-VERSION")) {
-            return line;
-        }
+        if (trimmed === '' || trimmed.startsWith("#EXTM3U") || trimmed.startsWith("#EXT-X-VERSION")) return line;
 
         if (trimmed.startsWith("#")) {
             return line.replace(/(URI\s*=\s*["'])([^"']+)(["'])/gi, (match, prefix, uri, suffix) => {
                 try {
                     let abs;
                     if (uri.startsWith('/')) {
-                        // ✅ URI kiểu /m3u8-proxy?... là relative của proxy worker
                         abs = workerUrl.origin + uri;
                     } else {
                         abs = new URL(uri, targetUrl.href).href;
                     }
                     return `${prefix}${generateProxyUrl(abs, workerUrl, headersParam)}${suffix}`;
-                } catch (e) {
-                    return match;
-                }
+                } catch (e) { return match; }
             });
         }
 
         try {
             const abs = new URL(trimmed, targetUrl.href).href;
             return generateProxyUrl(abs, workerUrl, headersParam);
-        } catch (e) {
-            return line;
-        }
+        } catch (e) { return line; }
     }).join("\n");
 }
+
+// ─── ANIMEPAHE SOURCE FETCHER ─────────────────────────────────────────────────
+
+/**
+ * Fetch source từ justanime.to (chạy trên CF, không bị block)
+ * sau đó rewrite các URL M3U8 qua proxy worker
+ *
+ * GET /animepahe-source?episodeid=<consumet_episode_id>&animeId=<anilist_id>&epNum=<number>
+ */
+async function handleAnimePaheSource(request, env, workerUrl) {
+    const url = new URL(request.url);
+    const episodeid = url.searchParams.get('episodeid');
+    const animeId   = url.searchParams.get('animeId');
+    const epNum     = url.searchParams.get('epNum') || '1';
+    const subtype   = url.searchParams.get('subtype') || 'sub';
+
+    const responseHeaders = new Headers();
+    setCorsHeaders(request, responseHeaders);
+    responseHeaders.set('Content-Type', 'application/json');
+
+    if (!episodeid && !animeId) {
+        return new Response(JSON.stringify({ error: 'episodeid or animeId required' }), { status: 400, headers: responseHeaders });
+    }
+
+    // ── Thử Consumet trước (nếu env có CONSUMET_URI) ──────────────────────────
+    if (env.CONSUMET_URI && episodeid) {
+        try {
+            const consumetUrl = `${env.CONSUMET_URI}/anime/animepahe/watch?episodeId=${encodeURIComponent(episodeid)}`;
+            const consumetRes = await fetch(consumetUrl, {
+                headers: {
+                    'User-Agent': CONFIG.DEFAULT_USER_AGENT,
+                    'Referer': 'https://animepahe.ru/',
+                    'Origin': 'https://animepahe.ru',
+                }
+            });
+
+            if (consumetRes.ok) {
+                const consumetData = await consumetRes.json();
+                if (consumetData?.sources?.length > 0) {
+                    const proxied = rewriteSourcesToProxy(consumetData, workerUrl.origin);
+                    return new Response(JSON.stringify(proxied), { status: 200, headers: responseHeaders });
+                }
+            }
+        } catch (e) {
+            console.log('[AnimePahe] Consumet failed:', e.message);
+        }
+    }
+
+    // ── Fallback: justanime.to ─────────────────────────────────────────────────
+    // justanime format: /api/watch/<animeId>/episode/<epNum>/animepahe
+    const targetAnimeId = animeId || (episodeid ? episodeid.split('/')[0].split('-')[0] : null);
+    if (!targetAnimeId) {
+        return new Response(JSON.stringify({ error: 'Cannot determine animeId' }), { status: 400, headers: responseHeaders });
+    }
+
+    try {
+        const justanimeUrl = `${CONFIG.JUSTANIME_BASE}/api/watch/${targetAnimeId}/episode/${epNum}/animepahe`;
+        console.log(`[AnimePahe] Fetching justanime: ${justanimeUrl}`);
+
+        const justanimeRes = await fetch(justanimeUrl, {
+            headers: {
+                'User-Agent': CONFIG.DEFAULT_USER_AGENT,
+                'Referer': 'https://animepahe.ru/',
+                'Origin': 'https://animepahe.ru',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+        });
+
+        if (!justanimeRes.ok) {
+            throw new Error(`justanime returned ${justanimeRes.status}`);
+        }
+
+        const justanimeData = await justanimeRes.json();
+        const sources = justanimeData?.[subtype]?.sources || justanimeData?.sub?.sources || justanimeData?.dub?.sources;
+
+        if (!sources?.length) {
+            return new Response(JSON.stringify({ error: 'No sources from justanime', raw: justanimeData }), { status: 502, headers: responseHeaders });
+        }
+
+        // Rewrite thành format giống Consumet rồi proxy URL
+        const normalized = {
+            sources: sources.map((s) => ({
+                url: s.url,
+                quality: s.quality || 'auto',
+                isM3U8: s.isM3U8 ?? s.url?.includes('.m3u8'),
+            })),
+            tracks: [],
+            headers: {
+                Referer: 'https://kwik.cx/',
+                Origin: 'https://animepahe.si',
+                'x-provider': 'animepahe',
+            },
+        };
+
+        const proxied = rewriteSourcesToProxy(normalized, workerUrl.origin);
+        return new Response(JSON.stringify(proxied), { status: 200, headers: responseHeaders });
+
+    } catch (e) {
+        console.error('[AnimePahe] justanime error:', e.message);
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: responseHeaders });
+    }
+}
+
+/**
+ * Rewrite tất cả M3U8 URL trong sources thành URL qua CF proxy
+ */
+function rewriteSourcesToProxy(data, workerOrigin) {
+    const kwikHeaders = JSON.stringify({ referer: 'https://kwik.cx/' });
+
+    return {
+        ...data,
+        sources: data.sources.map((s) => {
+            if (s.url?.includes('.m3u8')) {
+                return {
+                    ...s,
+                    url: generateProxyUrlBase(s.url, workerOrigin, kwikHeaders),
+                };
+            }
+            return s;
+        }),
+        headers: {
+            ...(data.headers || {}),
+            'x-provider': 'animepahe',
+        },
+    };
+}
+
+// ─── MAIN FETCH HANDLER ───────────────────────────────────────────────────────
 
 export default {
     async fetch(request, env, ctx) {
         const url = new URL(request.url);
         const origin = request.headers.get('origin') || "";
-
         const allowedOrigins = env.ALLOWED_ORIGINS ? env.ALLOWED_ORIGINS.split(',').map(o => o.trim()) : [];
 
+        // OPTIONS preflight
         if (request.method === "OPTIONS") {
             const h = new Headers();
             setCorsHeaders(request, h);
             return new Response(null, { headers: h });
         }
 
+        // Origin check
         if (!isOriginAllowed(origin, allowedOrigins)) {
             return new Response(`Origin "${origin}" blacklisted.`, { status: 403 });
         }
 
+        // ── Route: /animepahe-source ──────────────────────────────────────────
+        if (url.pathname === '/animepahe-source') {
+            return handleAnimePaheSource(request, env, url);
+        }
+
+        // ── Route: /m3u8-proxy (giữ nguyên logic cũ) ─────────────────────────
         const targetUrlStr = url.searchParams.get('url');
         if (!targetUrlStr) {
             return new Response("Missing 'url' parameter.", { status: 400 });
@@ -238,9 +364,7 @@ export default {
                     targetUrl.hostname.includes('owocdn') ||
                     targetUrl.hostname.includes('kwik');
 
-                if (isSegment) {
-                    responseHeaders.set('Content-Type', 'video/mp2t');
-                }
+                if (isSegment) responseHeaders.set('Content-Type', 'video/mp2t');
 
                 ['x-amz-cf-pop', 'x-amz-cf-id', 'x-cache', 'via', 'server'].forEach(h => responseHeaders.delete(h));
 
